@@ -1,5 +1,5 @@
 from nacl.signing import SigningKey, VerifyKey
-from nacl.encoding import HexEncoder, URLSafeBase64Encoder, RawEncoder
+from nacl.encoding import HexEncoder, URLSafeBase64Encoder, Base32Encoder, RawEncoder
 from nacl.hash import blake2b
 from nacl.secret import SecretBox
 import json
@@ -17,11 +17,11 @@ class Sign:
         """
         account: str, | k:address
 
-        keys: list = None | List of Tuples | [(public_key_hex, private_key_hex),(public_key_hex, private_key_hex)] | converted to [(VerifyKey, SigningKey),(VerifyKey, SigningKey)]
+        keys: list = None | List of Tuples containing HexEncoded Verifykey and Signature Key Strings
 
-        load: bool = False | load the keys from file. requires a valid username and password
+        load: bool = False | load the keys from file. requires valid password
 
-        save: bool = False | save the keys to file. requires a username and password
+        save: bool = False | save the keys to file. requires password
 
         password: str = False | password used  as a seed to generate an Asymetric ED25519 Curve Encryption Key for public/secret key storage
         """
@@ -34,7 +34,7 @@ class Sign:
             if self.load:
                 # try to load and construct the keys from the keys.json file
                 self.__keys = self.__loadKeys()
-
+                # convert the hex keys into Verify and Signing Key Objects
                 self.__keys = self.__constructKeys()
             else:
                 # generate new keys
@@ -50,30 +50,32 @@ class Sign:
         # convert to utf8 bytes
         pact_code_bytes = bytes(pact_code, encoding="utf8")
         # convert the pact code bytes into blake2b hashed bytes
-        hashed_blake2b = blake2b(pact_code_bytes, digest_size=32, encoder=HexEncoder)
+        hashed_blake2b = blake2b(pact_code_bytes, digest_size=32, encoder=RawEncoder)
         return hashed_blake2b
 
-    def hash(self, hashed_bytes: bytes) -> str:
+    def hash(self, hashed_bytes: bytes, num_bytes: int = 64) -> str:
         """
         convert and return the blake2b hashed bytes into base 64 url safe decoded string after removing any '=' sign that may appear on the far right of the string
 
         """
-        return URLSafeBase64Encoder.encode(hashed_bytes).decode().rstrip("=")
+        encoder = URLSafeBase64Encoder if num_bytes == 64 else Base32Encoder
+        return encoder.encode(hashed_bytes).decode().rstrip("=")
 
     def sign(self, hashed_bytes) -> list:
         """
         returns a list of HexEncoded signatures from each signing key in the self.__keys
-        _ = (VerifyKey, SigningKey)
-        _[-1] = SigningKey
-
         """
-        return [_[-1].sign(hashed_bytes).signature.hex() for _ in self.__keys]
+        return [__key[-1].sign(hashed_bytes).signature.hex() for __key in self.__keys]
 
     def hashAndSign(self, hashed_bytes) -> tuple:
         """
         return the ouput of both hash and sign functions
         """
-        return self.hash(hashed_bytes), self.sign(hashed_bytes)
+        return (
+            self.hash(hashed_bytes),
+            self.sign(hashed_bytes),
+            [__key[0].__bytes__().hex() for __key in self.__keys],
+        )
 
     def __constructKeys(self) -> list:
         """
@@ -83,17 +85,17 @@ class Sign:
         """
         return [
             (
-                VerifyKey(_[0], encoder=HexEncoder),
-                SigningKey(_[-1], encoder=HexEncoder),
+                VerifyKey(__key[0], encoder=HexEncoder),
+                SigningKey(__key[-1], encoder=HexEncoder),
             )
-            for _ in self.__keys
+            for __key in self.__keys
         ]
 
     def __genKeys(self) -> list:
         """
         generate a SigningKey and return it along with its VerifyKey counterpart in a tuple within a list [(VerifyKey, SigningKey)]
         """
-        return [(_.verify_key, _) for _ in [SigningKey.generate()]]
+        return [(__sk.verify_key, __sk) for __sk in [SigningKey.generate()]]
 
     def __loadKeys(self) -> list:
         """
@@ -105,24 +107,37 @@ class Sign:
         encrypted_keys = account_dict[self.account]
         return [
             (
-                self.__decrypt(bytes(_[0], encoding="utf8")),
-                self.__decrypt(bytes(_[-1], encoding="utf8")),
+                self.__decrypt(bytes(__key[0], encoding="utf8")),
+                self.__decrypt(bytes(__key[-1], encoding="utf8")),
             )
-            for _ in encrypted_keys
+            for __key in encrypted_keys
         ]
 
     def __hashPassword(self, __password: str) -> bytes:
-        return self.code2HashedBytes(__password[32:].zfill(32))[32:]
+        return self.code2HashedBytes(__password)[32:]
 
     def __saveKeys(self) -> None:
+        """
+        WARNING!!!!
+        A Different Password will overwrite the any encrypted keys with the new encryption
+        save the hex representations of VerifyKey and Signing Key into the keys.json config
+        {
+            "k:address": [
+                (
+                    "verify_key_hex",
+                    "public_key_hex:
+                )
+            ]
+        }
+        """
         with open("keys.json", "r") as fp:
             account_dict = json.load(fp)
         encrypted_keys = [
             (
-                self.__encrypt(bytes(key[0].__bytes__().hex(), encoding="utf8")),
-                self.__encrypt(bytes(key[-1].__bytes__().hex(), encoding="utf8")),
+                self.__encrypt(bytes(__key[0].__bytes__().hex(), encoding="utf8")),
+                self.__encrypt(bytes(__key[-1].__bytes__().hex(), encoding="utf8")),
             )
-            for key in self.__keys
+            for __key in self.__keys
         ]
         account_dict[self.account] = encrypted_keys
         with open("keys.json", "w") as fp:
